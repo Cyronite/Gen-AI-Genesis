@@ -2,6 +2,8 @@ import os
 import sys
 import base64
 import tempfile
+import glob
+import shutil
 import gradio as gr
 from renderVid import runCommand
 
@@ -21,11 +23,14 @@ def gradio_render(project_zip, main_file, scene_name, quality):
 
     # First extract the project files and set up directories
     dir = decodeFile(project_zip)
-
+    
     # Create vids directory if it doesn't exist
     vids_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vids")
     if not os.path.exists(vids_dir):
         os.makedirs(vids_dir, exist_ok=True)
+        
+    # Clean up any existing temporary files in media output directory
+    cleanup_temp_files()
 
     # Generate a timestamp for the output video filename
     import datetime
@@ -34,7 +39,13 @@ def gradio_render(project_zip, main_file, scene_name, quality):
     output_path = os.path.join(vids_dir, output_filename)
 
     # Define the media directory - where manim will output files
-    media_dir = os.path.dirname(os.path.abspath(__file__))
+    # Use system temp directory to avoid cluttering the main directory
+    import tempfile
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Create a temporary directory that will be automatically cleaned up
+    temp_media_dir = tempfile.mkdtemp(prefix="manim_render_")
+    media_dir = temp_media_dir
+    print(f"Using temporary directory for Manim output: {media_dir}")
 
     # Command to render MP4 without GUI
     # Different Manim versions have different CLI arguments, so we'll try multiple approaches
@@ -134,7 +145,7 @@ def gradio_render(project_zip, main_file, scene_name, quality):
     if not success and conda_activate and "conda activate" in conda_activate:
         print("Command failed. Trying again without conda activation...")
         # Try without conda activation as a last resort
-        last_resort_cmd = f"manimgl {main_file} {scene_name} -o --{quality}"
+        last_resort_cmd = f"manimgl {main_file} {scene_name} -o --{quality} --media_dir {media_dir}"
         success, stdout, stderr = runCommand(last_resort_cmd, working_dir=dir, shell=True)
         
     # After rendering, look for the video file in the media output
@@ -168,6 +179,9 @@ def gradio_render(project_zip, main_file, scene_name, quality):
         import time
         current_time = time.time()
         for mp4_file in glob.glob(os.path.join(media_dir, "**", "*.mp4"), recursive=True):
+            # Skip files already in the vids directory
+            if os.path.dirname(mp4_file) == vids_dir:
+                continue
             if os.path.getmtime(mp4_file) > current_time - 60:  # Created in the last minute
                 potential_video_paths.append(mp4_file)
 
@@ -182,7 +196,25 @@ def gradio_render(project_zip, main_file, scene_name, quality):
             import shutil
             shutil.copy2(found_video, output_path)
             print(f"Video copied to: {output_path}")
-
+            
+            # Remove the original file to avoid duplicates
+            try:
+                os.remove(found_video)
+                print(f"Removed original video file: {found_video}")
+            except Exception as e:
+                print(f"Warning: Could not remove original video: {e}")
+        
+            # Do one final cleanup after successful rendering
+            cleanup_temp_files()
+        
+            # Clean up the temporary media directory
+            try:
+                if temp_media_dir and os.path.exists(temp_media_dir):
+                    shutil.rmtree(temp_media_dir)
+                    print(f"Removed temporary media directory: {temp_media_dir}")
+            except Exception as e:
+                print(f"Warning: Could not remove temporary media directory: {e}")
+            
             # Return an embedded video player
             # Get relative path for display
             rel_path = os.path.relpath(output_path, os.path.dirname(os.path.abspath(__file__)))
@@ -230,6 +262,56 @@ def gradio_render(project_zip, main_file, scene_name, quality):
     return status, message, placeholder_html
 
 
+def cleanup_temp_files():
+    """
+    Cleans up temporary files created during the rendering process.
+    Removes any temporary directories and stray files.
+    """
+    try:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        vids_dir = os.path.join(script_dir, "vids")
+        
+        # Look for MP4 files in the main directory and subdirectories (except vids)
+        for root, dirs, files in os.walk(script_dir):
+            # Skip the vids directory
+            if root == vids_dir or "vids" in root:
+                continue
+                
+            # Remove any mp4 files found
+            for file in files:
+                if file.endswith(".mp4"):
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.remove(file_path)
+                        print(f"Cleaned up temporary file: {file_path}")
+                    except Exception as e:
+                        print(f"Could not remove temporary file {file_path}: {e}")
+    
+        # Also clean up tex, svg, and other temporary files created by Manim
+        temp_extensions = [".tex", ".svg", ".log", ".aux", ".dvi", ".ps"]
+        for ext in temp_extensions:
+            for file_path in glob.glob(os.path.join(script_dir, "**", f"*{ext}"), recursive=True):
+                if not "vids" in file_path:
+                    try:
+                        os.remove(file_path)
+                        print(f"Cleaned up temporary file: {file_path}")
+                    except Exception as e:
+                        print(f"Could not remove temporary file {file_path}: {e}")
+        
+        # Remove any temporary directories in /tmp that start with manim_render_ and are older than 30 minutes
+        import time
+        current_time = time.time()
+        for temp_dir in glob.glob(os.path.join(tempfile.gettempdir(), "manim_render_*")):
+            # Check if directory is older than 30 minutes
+            if os.path.isdir(temp_dir) and os.path.getmtime(temp_dir) < current_time - 1800:
+                try:
+                    shutil.rmtree(temp_dir)
+                    print(f"Removed old temporary directory: {temp_dir}")
+                except Exception as e:
+                    print(f"Could not remove temporary directory {temp_dir}: {e}")
+                    
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
 
 
 def decodeFile(projectZip):
