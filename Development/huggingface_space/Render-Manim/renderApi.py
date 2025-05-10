@@ -19,30 +19,174 @@ def gradio_render(project_zip, main_file, scene_name, quality):
     print(f"Received request - Main file: {main_file}, Scene: {scene_name}, Quality: {quality}")
     print(f"ZIP data length: {len(project_zip) if project_zip else 0} characters")
 
-    # Simply return the parameters for confirmation
-    status = "received"
-    message = (
-        f"Parameters received successfully:\n"
-        f"- Main file: {main_file}\n"
-        f"- Scene name: {scene_name}\n"
-        f"- Quality: {quality}\n"
-        f"- ZIP data length: {len(project_zip) if project_zip else 0} characters"
-    )
-
-    # Return a placeholder for the video
-    placeholder_html = """
-    <div style="width: 100%; height: 300px; background-color: #f0f0f0; display: flex;
-                justify-content: center; align-items: center; border-radius: 5px;">
-        <p style="text-align: center;">Video rendering placeholder.<br>
-        Implement your own rendering logic to replace this.</p>
-    </div>
-    """
-
+    # First extract the project files and set up directories
     dir = decodeFile(project_zip)
-    print(dir)
-    print(f"manimgl {main_file} {scene_name}")
-    print(runCommand(["manimgl", main_file, scene_name], working_dir="/Users/sidak/Development/huggingface_space/Render-Manim/tmp"))
+    
+    # Create vids directory if it doesn't exist
+    vids_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vids")
+    if not os.path.exists(vids_dir):
+        os.makedirs(vids_dir, exist_ok=True)
+    
+    # Generate a timestamp for the output video filename
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"{scene_name}_{timestamp}.mp4"
+    output_path = os.path.join(vids_dir, output_filename)
+    
+    # Define the media directory - where manim will output files
+    media_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Command to render MP4 without GUI
+    # Different Manim versions have different CLI arguments, so we'll try multiple approaches
+    print(f"Rendering {scene_name} to {output_path}")
+    
+    # Check which version of Manim is installed
+    version_cmd = ["manimgl", "--version"]
+    version_success, version_output, _ = runCommand(version_cmd, working_dir=dir)
+    
+    # Default to manimgl style arguments
+    cmd = [
+        "manimgl", 
+        main_file, 
+        scene_name, 
+        "-o",  # Output to file without GUI
+        f"--{quality}",
+        "--media_dir", media_dir
+    ]
+    
+    # If we can detect manim (not manimgl), adjust the commands
+    if not version_success:
+        print("Could not determine Manim version. Trying manim command instead of manimgl...")
+        # Try manim (instead of manimgl) command format
+        cmd = [
+            "manim",
+            main_file,
+            scene_name,
+            "-p",  # Preview file after rendering
+            f"-{quality[0]}",  # e.g., -l for low_quality, -m for medium_quality, -h for high_quality
+            "--media_dir", media_dir
+        ]
+    
+    print(f"Running command: {' '.join(cmd)}")
+    success, stdout, stderr = runCommand(cmd, working_dir=dir)
+    
+    # If first attempt failed, try alternate command structure
+    if not success:
+        print("First rendering attempt failed. Trying alternate command...")
+        if "manimgl" in cmd[0]:
+            # Try manim instead
+            alt_cmd = [
+                "manim",
+                main_file,
+                scene_name,
+                "-p",  # Preview file after rendering
+                f"-{quality[0]}",  # e.g., -l for low_quality
+                "--media_dir", media_dir
+            ]
+        else:
+            # Try manimgl instead
+            alt_cmd = [
+                "manimgl", 
+                main_file, 
+                scene_name, 
+                "--write_to_movie",
+                f"--{quality}",
+                "--media_dir", media_dir
+            ]
+            
+        print(f"Running alternate command: {' '.join(alt_cmd)}")
+        success, stdout, stderr = runCommand(alt_cmd, working_dir=dir)
+    print(f"Command output:\n{stdout}\n\nErrors:\n{stderr}")
+    
+    # After rendering, look for the video file in the media output
+    if success:
+        status = "success"
+        message = (
+            f"Video rendered successfully:\n"
+            f"- Main file: {main_file}\n"
+            f"- Scene name: {scene_name}\n"
+            f"- Quality: {quality}\n"
+            f"- Output directory: {media_dir}"
+        )
+        
+        # Manim typically outputs to a videos directory inside the media_dir
+        # Different versions put videos in different locations, so check multiple paths
+        potential_video_paths = [
+            # manimgl output paths
+            os.path.join(media_dir, "videos", f"{scene_name}.mp4"),
+            os.path.join(media_dir, "videos", main_file.replace(".py", ""), quality, f"{scene_name}.mp4"),
+            os.path.join(media_dir, "videos", scene_name, quality, f"{scene_name}.mp4"),
+            # manim (not manimgl) output paths
+            os.path.join(media_dir, "videos", main_file.replace(".py", ""), "480p15", f"{scene_name}.mp4"),
+            os.path.join(media_dir, "videos", main_file.replace(".py", ""), "720p30", f"{scene_name}.mp4"),
+            os.path.join(media_dir, "videos", main_file.replace(".py", ""), "1080p60", f"{scene_name}.mp4"),
+            # Try with file name
+            os.path.join(media_dir, "videos", f"{main_file.replace('.py', '')}_{scene_name}.mp4")
+        ]
+        
+        # Also look for .mp4 files that were created in the last minute
+        import glob
+        import time
+        current_time = time.time()
+        for mp4_file in glob.glob(os.path.join(media_dir, "**", "*.mp4"), recursive=True):
+            if os.path.getmtime(mp4_file) > current_time - 60:  # Created in the last minute
+                potential_video_paths.append(mp4_file)
+        
+        found_video = None
+        for path in potential_video_paths:
+            if os.path.exists(path):
+                found_video = path
+                break
+        
+        if found_video:
+            # Copy the file to our vids directory with the timestamped name
+            import shutil
+            shutil.copy2(found_video, output_path)
+            print(f"Video copied to: {output_path}")
+            
+            # Return an embedded video player
+            # Get relative path for display
+            rel_path = os.path.relpath(output_path, os.path.dirname(os.path.abspath(__file__)))
+            placeholder_html = f"""
+            <div style="width: 100%; padding: 10px;">
+                <p>Video rendered to: vids/{output_filename}</p>
+                <video width="100%" height="auto" controls>
+                    <source src="file://{output_path}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                <p style="font-size:0.8em; color:#666;">Note: The video file has been saved to the 'vids' directory.</p>
+            </div>
+            """
+        else:
+            status = "error"
+            message += "\n\nHowever, no output video file was found."
+            placeholder_html = """
+            <div style="width: 100%; height: 300px; background-color: #fff0e0; display: flex;
+                        justify-content: center; align-items: center; border-radius: 5px;">
+                <p style="text-align: center; color: #cc7700;">Rendering succeeded but video file not found.<br>
+                Check the logs for more information.</p>
+            </div>
+            """
+    else:
+        status = "error"
+        message = (
+            f"Video rendering failed:\n"
+            f"- Main file: {main_file}\n"
+            f"- Scene name: {scene_name}\n"
+            f"- Quality: {quality}\n"
+            f"- Error: {stderr}"
+        )
+        
+        # Return an error placeholder
+        placeholder_html = """
+        <div style="width: 100%; height: 300px; background-color: #ffe0e0; display: flex;
+                    justify-content: center; align-items: center; border-radius: 5px;">
+            <p style="text-align: center; color: #cc0000;">Video rendering failed.<br>
+            Check the logs for more information.</p>
+        </div>
+        """
 
+    # Note: All rendering logic has been moved above
 
     return status, message, placeholder_html
 
